@@ -46,6 +46,12 @@ env/
 .coverage
 htmlcov/
 
+# Local patch builds
+dist_patches/*.dylib
+dist_patches/*.o
+dist_patches/*.c
+dist_patches/Makefile
+
 # Logs and databases
 *.log
 *.sqlite

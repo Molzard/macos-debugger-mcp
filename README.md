@@ -10,8 +10,9 @@ The server exposes low-level macOS debugging capabilities to MCP clients:
 - **Apple LLDB Engine:** `lldb.SBDebugger` target attachment and hardware watchpoint instrumentation (`SBTarget.WatchAddress`) with resilient headless scripting fallback via `/usr/bin/python3`.
 - **Security Diagnostic:** Automatic diagnosis for task port permission failures (`KERN_FAILURE`, SIP, and `get-task-allow`).
 
-## Tools Implemented
+## Tools Implemented (14 MCP Tools)
 
+### Core Debugging & Memory Inspection
 1. `list_target_processes`: Enumerate running processes with PID, executable path, architecture, and bundle ID.
 2. `attach_debugger`: Attach LLDB debugger and acquire Mach task port for target PID.
 3. `inspect_memory_regions`: Retrieve virtual memory map, segment sizes, user tags (Heap, Stack, Dyld), and protection flags (`r-x`, `rw-`).
@@ -19,6 +20,17 @@ The server exposes low-level macOS debugging capabilities to MCP clients:
 5. `read_memory_bytes`: Read memory and unpack as `hex`, `int32`, `int64`, `float`, `double`, or `string`.
 6. `write_memory_bytes`: Patch memory addresses with hex payloads (with automatic page protection override if read-only).
 7. `set_watchpoint`: Set ARM64 hardware watchpoints (`read`, `write`, `read_write`) with resilient LLDB bridge.
+
+### Unity IL2CPP Semantic Profiling
+8. `resolve_object_at_address`: Parse IL2CPP runtime `Il2CppClass*` at address and reconstruct full object graph (fields, types, child elements).
+9. `find_active_instances_of_class`: Search writable heap for all active allocated instances of a given C# class.
+
+### Heap Snapshots, State Freezing, & Dylib Exporter
+10. `take_memory_snapshot`: Capture a point-in-time snapshot of process writable heap regions.
+11. `diff_memory_snapshots`: Compare two heap snapshots to find mutated values (`changed`, `increased`, `decreased`, `exact_difference`).
+12. `freeze_address_value`: Lock a memory address to a fixed value with a background assertion worker thread.
+13. `unfreeze_address_value`: Release an active memory freeze worker thread.
+14. `export_dylib_patch`: Compile standalone ARM64 C/Objective-C patch into a distributable `.dylib` via `clang`.
 
 ## Requirements & Permissions
 
