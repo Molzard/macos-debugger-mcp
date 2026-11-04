@@ -34,11 +34,12 @@ def take_memory_snapshot(
 
     for r in regions:
         # Filter for writable regions
-        if "w" not in r.get("protection_str", ""):
+        prot = r.get("protection") or r.get("protection_str", "")
+        if "w" not in prot:
             continue
 
-        addr_str = r.get("start")
-        size = r.get("size", 0)
+        addr_str = r.get("start_address") or r.get("start")
+        size = r.get("size_bytes") or r.get("size", 0)
         if not addr_str or size <= 0:
             continue
 
