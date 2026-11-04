@@ -286,6 +286,27 @@ def export_dylib_patch(
     return _export(patch_name, target_framework, patches, output_dir)
 
 
+@server.tool()
+def invoke_native_method(
+    pid: int,
+    function_address: str,
+    args: Optional[list[dict[str, Any]]] = None,
+    return_type: str = "void",
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Invoke a native C/C++/IL2CPP function or method at a given address in target process using dynamic runtime evaluation.
+
+    Args:
+        pid: Target process ID.
+        function_address: Hex memory address of function entry point (e.g. '0x102b48000').
+        args: Optional array of typed arguments: [{'type': 'int32'|'int64'|'float'|'double'|'pointer'|'string', 'value': ...}].
+        return_type: Expected return type ('void', 'int32', 'int64', 'float', 'double', 'pointer', 'string', default: 'void').
+        timeout: Execution timeout limit in seconds (default: 5.0).
+    """
+    from .invoker import invoke_native_method as _invoke
+    return _invoke(_debugger, pid, function_address, args=args, return_type=return_type, timeout=timeout)
+
+
 def main() -> None:
     """Run the MCP server over stdio transport."""
     server.run(transport="stdio")
