@@ -46,6 +46,17 @@ def invoke_native_method(
         js_code = """
         rpc.exports = {
             invoke: function(funcAddr, retType, args) {
+                // Auto-attach thread to IL2CPP runtime if available
+                const pDomainGet = Module.findGlobalExportByName("il2cpp_domain_get");
+                const pThreadAttach = Module.findGlobalExportByName("il2cpp_thread_attach");
+                if (pDomainGet && pThreadAttach) {
+                    try {
+                        const domainGet = new NativeFunction(pDomainGet, "pointer", []);
+                        const threadAttach = new NativeFunction(pThreadAttach, "pointer", ["pointer"]);
+                        threadAttach(domainGet());
+                    } catch(e) {}
+                }
+
                 // Safety Guard: Verify memory region executability
                 const p = ptr(funcAddr);
                 const r = Process.findRangeByAddress(p);
