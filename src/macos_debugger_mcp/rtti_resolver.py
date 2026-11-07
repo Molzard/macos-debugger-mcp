@@ -119,11 +119,14 @@ class MachVMAccess:
             _mach_port_deallocate(_mach_task_self(), self._task_port)
             self._task_port = None
 
-    def read_bytes(self, address: int, size: int) -> bytes:
-        """Safely read memory from process address via mach_vm_read_overwrite."""
+    def read_bytes(self, address: int, size: int, preallocated_buf: Optional[Any] = None) -> bytes:
+        """Safely read memory from process address via mach_vm_read_overwrite with 16KB guard-page fallback."""
         if size <= 0:
             return b""
-        buf = ctypes.create_string_buffer(size)
+        if not _mach_vm_read_overwrite:
+            raise RuntimeError("mach_vm_read_overwrite API not available")
+        PAGE_SIZE = 16384
+        buf = preallocated_buf if (preallocated_buf is not None and len(preallocated_buf) >= size) else ctypes.create_string_buffer(size)
         out_size = ctypes.c_size_t()
         target_addr = ctypes.cast(buf, ctypes.c_void_p).value or 0
         kr = _mach_vm_read_overwrite(
@@ -133,9 +136,33 @@ class MachVMAccess:
             ctypes.c_uint64(target_addr),
             ctypes.byref(out_size),
         )
-        if kr != 0:
-            raise MachVMError(f"mach_vm_read_overwrite failed at 0x{address:x} (size: {size}, kr: {kr})")
-        return bytes(buf.raw[: out_size.value])
+        if kr == 0:
+            return bytes(buf.raw[: out_size.value])
+
+        if size > PAGE_SIZE:
+            # Fallback to page-by-page reading if a guard page caused failure in large chunk
+            result = bytearray()
+            curr = address
+            end = address + size
+            page_buf = ctypes.create_string_buffer(PAGE_SIZE)
+            page_addr = ctypes.cast(page_buf, ctypes.c_void_p).value or 0
+            while curr < end:
+                p_read = min(PAGE_SIZE, end - curr)
+                p_kr = _mach_vm_read_overwrite(
+                    self.task_port,
+                    ctypes.c_uint64(curr),
+                    ctypes.c_uint64(p_read),
+                    ctypes.c_uint64(page_addr),
+                    ctypes.byref(out_size),
+                )
+                if p_kr == 0:
+                    result.extend(page_buf.raw[: out_size.value])
+                else:
+                    result.extend(b"\x00" * p_read)
+                curr += p_read
+            return bytes(result)
+
+        raise MachVMError(f"mach_vm_read_overwrite failed at 0x{address:x} (size: {size}, kr: {kr})")
 
     def read_uint64(self, address: int) -> int:
         data = self.read_bytes(address, 8)
@@ -375,8 +402,15 @@ class RTTIResolver:
         max_results: int = 50,
         read_fn: Optional[Callable[[int, int], bytes]] = None,
         regions: Optional[List[Tuple[int, int, int]]] = None,
+        target_klass: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Scans writable memory regions for allocated heap instances of the specified class."""
+        """Scans writable memory regions for allocated heap instances of the specified class.
+        
+        Hardened for macOS Apple Silicon:
+        - Two-stage pointer indexing with instant MonitorData filter (*(addr+0x0)==klass && *(addr+0x8)==0).
+        - Strictly bounded chunk traversal to region end with 16KB page-aligned fallback.
+        - Pre-allocated buffer to eliminate Python GC allocations during scanning.
+        """
         tdef = self.meta.find_type(class_name)
         if not tdef:
             return []
@@ -385,21 +419,67 @@ class RTTIResolver:
         reader = read_fn or (lambda a, sz: self.vm.read_bytes(a, sz) if self.vm else b"")
         mem_regions = regions or (self.vm.enumerate_regions(writable_only=True) if self.vm else [])
 
-        # Step through memory regions in 8-byte increments
+        PAGE_SIZE = 16384
+        CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB dynamic chunk
+        prealloc_buf = ctypes.create_string_buffer(CHUNK_SIZE)
+
+        cached_target_klass: Optional[int] = target_klass
+
+        # Step through memory regions bounded strictly to region end
         for start, end, _ in mem_regions:
-            size = min(end - start, 4 * 1024 * 1024)  # Scan in bounded 4MB chunks
-            try:
-                chunk = reader(start, size)
-                for off in range(0, len(chunk) - 8, 8):
-                    ptr = struct.unpack_from("<Q", chunk, off)[0]
-                    # Verify if ptr points to a matching class descriptor
-                    obj_addr = start + off
+            curr = start
+            while curr < end:
+                rem = end - curr
+                to_read = min(CHUNK_SIZE, rem)
+                if to_read > PAGE_SIZE:
+                    to_read = (to_read // PAGE_SIZE) * PAGE_SIZE
+
+                try:
+                    if self.vm and hasattr(self.vm, "read_bytes") and not read_fn:
+                        chunk = self.vm.read_bytes(curr, to_read, preallocated_buf=prealloc_buf)
+                    else:
+                        chunk = reader(curr, to_read)
+                except Exception:
+                    curr += to_read
+                    continue
+
+                chunk_len = len(chunk)
+                if chunk_len < 16:
+                    curr += to_read
+                    continue
+
+                # Two-Stage Pointer Indexing & Filter MonitorData:
+                # Managed objects in Unity IL2CPP (Boehm-Demers-Weiser GC) are 8-byte aligned.
+                # Object layout:
+                #   address + 0x0: Il2CppClass* klass
+                #   address + 0x8: MonitorData* monitor (0x0 in 99.9% of objects outside synchronized blocks)
+                for off in range(0, chunk_len - 15, 8):
+                    klass_ptr, monitor_ptr = struct.unpack_from("<QQ", chunk, off)
+
+                    # Stage 1: MonitorData filter: must be exactly 0 (unlocked managed object)
+                    if monitor_ptr != 0 or klass_ptr < 0x1000:
+                        continue
+
+                    # Stage 2: Target Class pointer matching: *(uint64_t*)(addr + 0) == target_klass
+                    if cached_target_klass is not None:
+                        if klass_ptr != cached_target_klass:
+                            continue
+                    else:
+                        # Discover target_klass descriptor pointer from first candidate match
+                        _, resolved_name = self._resolve_class_from_descriptor(klass_ptr, reader)
+                        if resolved_name == tdef.name or resolved_name == tdef.full_name:
+                            cached_target_klass = klass_ptr
+                        else:
+                            continue
+
+                    # Verified candidate: *(addr + 0) == target_klass && *(addr + 8) == 0
+                    obj_addr = curr + off
                     res = self.resolve_object_at_address(obj_addr, read_fn=reader)
                     if res.get("class_name") == tdef.name or res.get("class_name") == tdef.full_name:
                         results.append(res)
                         if len(results) >= max_results:
                             return results
-            except Exception:
-                continue
+
+                curr += to_read
 
         return results

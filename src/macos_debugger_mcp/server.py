@@ -307,6 +307,23 @@ def invoke_native_method(
     return _invoke(_debugger, pid, function_address, args=args, return_type=return_type, timeout=timeout)
 
 
+@server.tool()
+def generate_arm64_aob_signature(
+    pid: int,
+    function_address: str,
+    scan_length: int = 64,
+) -> dict[str, Any]:
+    """Generate update-resilient Array of Bytes (AoB) pattern signature from ARM64 machine code with PC-relative relocation wildcarding.
+
+    Args:
+        pid: Target process ID.
+        function_address: Hex memory address of function entry point or instruction (e.g. '0x102b48000').
+        scan_length: Number of bytes to analyze from target address (default: 64).
+    """
+    from .aob_generator import generate_arm64_aob_signature as _gen_aob
+    return _gen_aob(_debugger, pid, function_address, scan_length=scan_length)
+
+
 def main() -> None:
     """Run the MCP server over stdio transport."""
     server.run(transport="stdio")

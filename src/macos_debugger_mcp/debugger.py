@@ -27,6 +27,9 @@ try:
 except OSError:
     _libproc = None
 
+PAGE_SIZE = 16384  # 16 KB page size on macOS Apple Silicon (ARM64)
+
+
 # Mach structures and prototypes
 class vm_region_submap_info_64(ctypes.Structure):
     _fields_ = [
@@ -167,6 +170,67 @@ class MacOSDebugger:
 
         self.task_ports[pid] = port_out.value
         return port_out.value
+
+    def cleanup_task_port(self, pid: int) -> bool:
+        """Deallocate Mach task port for PID if held."""
+        if pid in self.task_ports:
+            port = self.task_ports.pop(pid)
+            if port != _mach_task_self():
+                try:
+                    _mach_port_deallocate(_mach_task_self(), port)
+                except Exception:
+                    pass
+            return True
+        return False
+
+    def read_raw_bytes(
+        self, pid: int, address: int, size: int, preallocated_buf: Optional[Any] = None
+    ) -> bytes:
+        """Safely read raw memory bytes with preallocated buffer support and 16KB guard-page fallback."""
+        if size <= 0:
+            return b""
+        task = self.get_task_port(pid)
+        if not _mach_vm_read_overwrite:
+            raise RuntimeError("mach_vm_read_overwrite API not available")
+
+        buf = preallocated_buf if (preallocated_buf is not None and len(preallocated_buf) >= size) else ctypes.create_string_buffer(size)
+        buf_addr = ctypes.addressof(buf)
+        out_size = ctypes.c_size_t(0)
+
+        kr = _mach_vm_read_overwrite(
+            task,
+            ctypes.c_uint64(address),
+            ctypes.c_uint64(size),
+            ctypes.c_uint64(buf_addr),
+            ctypes.byref(out_size),
+        )
+        if kr == 0:
+            return bytes(buf.raw[: out_size.value])
+
+        if size > PAGE_SIZE:
+            result = bytearray()
+            curr = address
+            end = address + size
+            page_buf = ctypes.create_string_buffer(PAGE_SIZE)
+            page_buf_addr = ctypes.addressof(page_buf)
+            while curr < end:
+                p_read = min(PAGE_SIZE, end - curr)
+                p_kr = _mach_vm_read_overwrite(
+                    task,
+                    ctypes.c_uint64(curr),
+                    ctypes.c_uint64(p_read),
+                    ctypes.c_uint64(page_buf_addr),
+                    ctypes.byref(out_size),
+                )
+                if p_kr == 0:
+                    result.extend(page_buf.raw[: out_size.value])
+                else:
+                    result.extend(b"\x00" * p_read)
+                curr += p_read
+            return bytes(result)
+
+        err_desc = mach_error_string(kr)
+        raise ValueError(f"Read failed at 0x{address:x} (size {size}): {err_desc}")
 
     def list_processes(self, name_filter: Optional[str] = None) -> list[dict[str, Any]]:
         """List running macOS processes with PID, name, arch, and bundle ID."""
@@ -397,8 +461,9 @@ class MacOSDebugger:
         count = ctypes.c_uint32(ctypes.sizeof(info) // 4)
 
         matches: list[dict[str, Any]] = []
-        chunk_size = 1024 * 1024  # 1 MB chunk
-        buf = ctypes.create_string_buffer(chunk_size)
+        max_chunk_size = 1024 * 1024  # 1 MB dynamic chunk
+        buf = ctypes.create_string_buffer(max_chunk_size)
+        buf_addr = ctypes.addressof(buf)
         out_size = ctypes.c_size_t(0)
 
         reg_mode = region_type.lower()
@@ -431,12 +496,16 @@ class MacOSDebugger:
                 prot_str = format_protection(info.protection)
 
                 while curr < reg_end:
-                    to_read = min(chunk_size, reg_end - curr)
+                    rem = reg_end - curr
+                    to_read = min(max_chunk_size, rem)
+                    if to_read > PAGE_SIZE:
+                        to_read = (to_read // PAGE_SIZE) * PAGE_SIZE
+
                     kr_read = _mach_vm_read_overwrite(
                         task,
                         ctypes.c_uint64(curr),
                         ctypes.c_uint64(to_read),
-                        ctypes.addressof(buf),
+                        ctypes.c_uint64(buf_addr),
                         ctypes.byref(out_size),
                     )
                     if kr_read == 0 and out_size.value >= needle_len:
@@ -459,12 +528,52 @@ class MacOSDebugger:
                                 break
                             pos = idx + 1
 
-                    if len(matches) >= max_results:
-                        break
+                        if len(matches) >= max_results:
+                            break
+                        step = to_read if to_read <= needle_len else (to_read - (needle_len - 1))
+                        curr += step
+                    elif to_read > PAGE_SIZE:
+                        # Fallback to page-by-page traversal (16 KB) for unmapped/guard pages within this chunk
+                        page_curr = curr
+                        chunk_end = curr + to_read
+                        while page_curr < chunk_end:
+                            p_read = min(PAGE_SIZE, chunk_end - page_curr)
+                            kr_page = _mach_vm_read_overwrite(
+                                task,
+                                ctypes.c_uint64(page_curr),
+                                ctypes.c_uint64(p_read),
+                                ctypes.c_uint64(buf_addr),
+                                ctypes.byref(out_size),
+                            )
+                            if kr_page == 0 and out_size.value >= needle_len:
+                                p_data = buf.raw[: out_size.value]
+                                pos = 0
+                                while pos <= len(p_data) - needle_len:
+                                    idx = p_data.find(needle, pos)
+                                    if idx == -1:
+                                        break
+                                    match_addr = page_curr + idx
+                                    matches.append({
+                                        "address": f"0x{match_addr:x}",
+                                        "offset": idx,
+                                        "region_base": f"0x{reg_start:x}",
+                                        "region_size": reg_len,
+                                        "protection": prot_str,
+                                        "user_tag": tag_name,
+                                    })
+                                    if len(matches) >= max_results:
+                                        break
+                                    pos = idx + 1
 
-                    # Step forward with overlap for boundaries
-                    step = to_read if to_read <= needle_len else (to_read - (needle_len - 1))
-                    curr += step
+                            if len(matches) >= max_results:
+                                break
+                            page_curr += p_read
+
+                        if len(matches) >= max_results:
+                            break
+                        curr += to_read
+                    else:
+                        curr += PAGE_SIZE
 
             if len(matches) >= max_results:
                 break

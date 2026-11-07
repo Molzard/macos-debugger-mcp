@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import struct
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-# In-memory snapshot store: {snapshot_name: {base_address: (size, raw_bytes)}}
+PAGE_SIZE = 16384  # 16 KB page size on macOS Apple Silicon (ARM64)
+CHUNK_SIZE = 1024 * 1024  # 1 MB dynamic chunk size
+
+# In-memory snapshot store: {snapshot_name: {base_address: raw_bytes}}
 _snapshots: Dict[str, Dict[int, bytes]] = {}
 
 DATA_TYPE_FORMATS = {
@@ -24,13 +28,19 @@ def take_memory_snapshot(
     snapshot_name: str,
     max_total_mb: int = 128,
 ) -> Dict[str, Any]:
-    """Capture all writable memory regions (heap rw-) of target process into memory."""
+    """Capture all writable memory regions (heap rw-) of target process into memory.
+    
+    Hardened for macOS Apple Silicon with 16KB page-aligned fallback and pre-allocated buffers.
+    """
     regions_info = debugger.inspect_memory_regions(pid, limit=1000)
     regions = regions_info.get("regions", [])
 
     snapshot: Dict[int, bytes] = {}
     total_bytes = 0
     max_bytes = max_total_mb * 1024 * 1024
+
+    # Pre-allocated chunk buffer to minimize Python GC pressure during scans
+    prealloc_buf = ctypes.create_string_buffer(CHUNK_SIZE)
 
     for r in regions:
         # Filter for writable regions
@@ -44,21 +54,63 @@ def take_memory_snapshot(
             continue
 
         base_addr = int(addr_str, 16) if isinstance(addr_str, str) else addr_str
+        reg_end = base_addr + size
+        curr = base_addr
 
-        # Skip oversized or virtual mapping regions
-        chunk_size = min(size, 2 * 1024 * 1024)
-        if total_bytes + chunk_size > max_bytes:
+        # Strictly traverse within region boundaries
+        while curr < reg_end:
+            if total_bytes >= max_bytes:
+                break
+
+            rem = reg_end - curr
+            to_read = min(CHUNK_SIZE, rem)
+            if to_read > PAGE_SIZE:
+                to_read = (to_read // PAGE_SIZE) * PAGE_SIZE
+
+            chunk_bytes = None
+            try:
+                if hasattr(debugger, "read_raw_bytes"):
+                    chunk_bytes = debugger.read_raw_bytes(pid, curr, to_read, preallocated_buf=prealloc_buf)
+                else:
+                    res = debugger.read_memory(pid, hex(curr), to_read, fmt="hex")
+                    hex_data = res.get("hex", "")
+                    chunk_bytes = bytes.fromhex(hex_data) if hex_data else None
+            except Exception:
+                # If a large block read fails (e.g. guard page inside chunk), fallback to 16 KB pages
+                if to_read > PAGE_SIZE:
+                    page_curr = curr
+                    chunk_end = curr + to_read
+                    while page_curr < chunk_end:
+                        if total_bytes >= max_bytes:
+                            break
+                        p_read = min(PAGE_SIZE, chunk_end - page_curr)
+                        try:
+                            if hasattr(debugger, "read_raw_bytes"):
+                                p_data = debugger.read_raw_bytes(pid, page_curr, p_read, preallocated_buf=prealloc_buf)
+                            else:
+                                res = debugger.read_memory(pid, hex(page_curr), p_read, fmt="hex")
+                                hex_data = res.get("hex", "")
+                                p_data = bytes.fromhex(hex_data) if hex_data else None
+
+                            if p_data:
+                                snapshot[page_curr] = p_data
+                                total_bytes += len(p_data)
+                        except Exception:
+                            pass
+                        page_curr += p_read
+                    curr += to_read
+                    continue
+                else:
+                    curr += PAGE_SIZE
+                    continue
+
+            if chunk_bytes:
+                snapshot[curr] = chunk_bytes
+                total_bytes += len(chunk_bytes)
+            curr += to_read
+
+        if total_bytes >= max_bytes:
             break
-
-        try:
-            res = debugger.read_memory(pid, hex(base_addr), chunk_size, fmt="hex")
-            hex_data = res.get("hex", "")
-            raw = bytes.fromhex(hex_data)
-            if raw:
-                snapshot[base_addr] = raw
-                total_bytes += len(raw)
-        except Exception:
-            continue
 
     _snapshots[snapshot_name] = snapshot
 
