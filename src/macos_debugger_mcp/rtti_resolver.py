@@ -13,8 +13,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 try:
     from .il2cpp_metadata import Il2CppMetadataParser, TypeInfoDef
+    from .utils import strip_pac
 except ImportError:
-    from il2cpp_metadata import Il2CppMetadataParser, TypeInfoDef
+    from il2cpp_metadata import Il2CppMetadataParser, TypeInfoDef  # type: ignore
+    try:
+        from utils import strip_pac  # type: ignore
+    except ImportError:
+        def strip_pac(ptr: int) -> int:  # type: ignore
+            if ptr is None or not isinstance(ptr, int):
+                return 0
+            return ptr & 0x00007FFFFFFFFFFF
 
 # Native Mach VM definitions via libSystem
 _libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
@@ -125,6 +133,7 @@ class MachVMAccess:
             return b""
         if not _mach_vm_read_overwrite:
             raise RuntimeError("mach_vm_read_overwrite API not available")
+        address = strip_pac(address)
         PAGE_SIZE = 16384
         buf = preallocated_buf if (preallocated_buf is not None and len(preallocated_buf) >= size) else ctypes.create_string_buffer(size)
         out_size = ctypes.c_size_t()
@@ -247,7 +256,7 @@ class RTTIResolver:
         max_depth: int = 2,
     ) -> Dict[str, Any]:
         """Resolves an IL2CPP heap object at the specified memory address."""
-        addr = self.parse_address(target_address)
+        addr = strip_pac(self.parse_address(target_address))
 
         # 1. ARM64 8-byte pointer boundary verification
         if addr % 8 != 0:
@@ -265,7 +274,7 @@ class RTTIResolver:
             header_bytes = reader(addr, 8)
             if len(header_bytes) < 8:
                 return {"error": "UnreadableMemory", "raw_address": hex(addr)}
-            klass_ptr = struct.unpack("<Q", header_bytes)[0]
+            klass_ptr = strip_pac(struct.unpack("<Q", header_bytes)[0])
 
             if klass_ptr == 0:
                 return {
@@ -341,12 +350,13 @@ class RTTIResolver:
     ) -> Tuple[Optional[TypeInfoDef], str]:
         """Reads Class descriptor metadata to cross-reference against offline definitions."""
         try:
+            klass_ptr = strip_pac(klass_ptr)
             # Read first 48 bytes of Il2CppClass
             desc_bytes = reader(klass_ptr, 48)
             if len(desc_bytes) >= 32:
                 # Name and Namespace pointers are typically at offsets 0x10 and 0x18 in Il2CppClass
-                name_ptr = struct.unpack("<Q", desc_bytes[16:24])[0]
-                ns_ptr = struct.unpack("<Q", desc_bytes[24:32])[0]
+                name_ptr = strip_pac(struct.unpack("<Q", desc_bytes[16:24])[0])
+                ns_ptr = strip_pac(struct.unpack("<Q", desc_bytes[24:32])[0])
 
                 if name_ptr > 0x1000:
                     name_str = reader(name_ptr, 64).split(b"\x00")[0].decode("utf-8", errors="replace")
@@ -361,6 +371,7 @@ class RTTIResolver:
 
     def _read_system_string(self, str_ptr: int, reader: Callable[[int, int], bytes]) -> Optional[str]:
         """Unpack System.String (length at offset +0x10, utf-16 characters at +0x14)."""
+        str_ptr = strip_pac(str_ptr)
         if str_ptr == 0:
             return None
         try:
@@ -377,13 +388,14 @@ class RTTIResolver:
 
     def _inspect_collection(self, coll_ptr: int, reader: Callable[[int, int], bytes]) -> Optional[str]:
         """Inspects List<T> or Array headers (elements count)."""
+        coll_ptr = strip_pac(coll_ptr)
         if coll_ptr == 0:
             return "null"
         try:
             # In IL2CPP List<T>: offset 0x10 is _items (Array), offset 0x18 is _size (int32)
             header = reader(coll_ptr, 28)
             if len(header) >= 28:
-                items_ptr = struct.unpack("<Q", header[16:24])[0]
+                items_ptr = strip_pac(struct.unpack("<Q", header[16:24])[0])
                 size = struct.unpack("<i", header[24:28])[0]
                 if 0 <= size < 10000 and items_ptr != 0:
                     return f"List (Elements: {size})"
@@ -423,7 +435,7 @@ class RTTIResolver:
         CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB dynamic chunk
         prealloc_buf = ctypes.create_string_buffer(CHUNK_SIZE)
 
-        cached_target_klass: Optional[int] = target_klass
+        cached_target_klass: Optional[int] = strip_pac(target_klass) if target_klass is not None else None
 
         # Step through memory regions bounded strictly to region end
         for start, end, _ in mem_regions:
@@ -455,6 +467,7 @@ class RTTIResolver:
                 #   address + 0x8: MonitorData* monitor (0x0 in 99.9% of objects outside synchronized blocks)
                 for off in range(0, chunk_len - 15, 8):
                     klass_ptr, monitor_ptr = struct.unpack_from("<QQ", chunk, off)
+                    klass_ptr = strip_pac(klass_ptr)
 
                     # Stage 1: MonitorData filter: must be exactly 0 (unlocked managed object)
                     if monitor_ptr != 0 or klass_ptr < 0x1000:

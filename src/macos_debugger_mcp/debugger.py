@@ -18,6 +18,7 @@ from .utils import (
     format_size,
     mach_error_string,
     parse_address,
+    strip_pac,
 )
 
 # Load native libraries
@@ -189,6 +190,7 @@ class MacOSDebugger:
         """Safely read raw memory bytes with preallocated buffer support and 16KB guard-page fallback."""
         if size <= 0:
             return b""
+        address = strip_pac(address)
         task = self.get_task_port(pid)
         if not _mach_vm_read_overwrite:
             raise RuntimeError("mach_vm_read_overwrite API not available")
@@ -599,7 +601,7 @@ class MacOSDebugger:
         if size > 10 * 1024 * 1024:
             raise ValueError("Read size exceeds 10 MB safety ceiling")
 
-        addr = parse_address(address_str)
+        addr = strip_pac(parse_address(address_str))
         task = self.get_task_port(pid)
 
         # First attempt via LLDB if active
@@ -654,7 +656,7 @@ class MacOSDebugger:
         self, pid: int, address_str: str, bytes_hex: str
     ) -> dict[str, Any]:
         """Modify memory state at address (with automatic page protection override if needed)."""
-        addr = parse_address(address_str)
+        addr = strip_pac(parse_address(address_str))
         clean_hex = bytes_hex.strip().replace(" ", "").replace("0x", "")
         try:
             payload = bytes.fromhex(clean_hex)
@@ -796,7 +798,7 @@ except Exception as ex:
         if watch_type not in ("read", "write", "read_write"):
             raise ValueError("watch_type must be 'read', 'write', or 'read_write'")
 
-        addr = parse_address(address_str)
+        addr = strip_pac(parse_address(address_str))
 
         # 1. If in-process LLDB is attached and valid
         if (

@@ -145,7 +145,7 @@ class TestKernelHardeningAndAOB(unittest.TestCase):
             tokens.extend(t)
 
         sig = " ".join(tokens)
-        expected = "F8 5F BC A9 ?? ?? 00 91 ?? ?? ?? 14 E0 03 13 AA C0 03 5F D6"
+        expected = "F8 5F BC A9 00 ?? ?? 91 ?? ?? ?? 14 E0 03 13 AA C0 03 5F D6"
         self.assertEqual(sig, expected)
 
     def test_04_arm64_aob_signature_generator_uniqueness(self):

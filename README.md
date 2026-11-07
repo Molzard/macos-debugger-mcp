@@ -10,7 +10,7 @@ The server exposes low-level macOS debugging capabilities to MCP clients:
 - **Apple LLDB Engine:** `lldb.SBDebugger` target attachment and hardware watchpoint instrumentation (`SBTarget.WatchAddress`) with resilient headless scripting fallback via `/usr/bin/python3`.
 - **Security Diagnostic:** Automatic diagnosis for task port permission failures (`KERN_FAILURE`, SIP, and `get-task-allow`).
 
-## Tools Implemented (16 MCP Tools)
+## Tools Implemented (18 MCP Tools)
 
 ### Core Debugging & Memory Inspection
 1. `list_target_processes`: Enumerate running processes with PID, executable path, architecture, and bundle ID.
@@ -25,18 +25,20 @@ The server exposes low-level macOS debugging capabilities to MCP clients:
 8. `resolve_object_at_address`: Parse IL2CPP runtime `Il2CppClass*` at address and reconstruct full object graph (fields, types, child elements).
 9. `find_active_instances_of_class`: Search writable heap for all active allocated instances of a given C# class with two-stage pointer indexing and MonitorData filtering.
 
-### Remote Native Execution
+### Remote Native Execution & Live Telemetry
 10. `invoke_native_method`: Call a native C/C++/IL2CPP function at runtime using Frida Core with LLDB fallback.
+11. `hook_and_log_method`: Temporary non-destructive live hook via Frida to record function arguments (`x0`–`x7`), floats (`d0`–`d7`), return value, and accurate backtrace without process freezing.
 
 ### Heap Snapshots, State Freezing, & Dylib Exporter
-11. `take_memory_snapshot`: Capture a point-in-time snapshot of process writable heap regions with 16KB guard-page fallback.
-12. `diff_memory_snapshots`: Compare two heap snapshots to find mutated values (`changed`, `increased`, `decreased`, `exact_difference`).
-13. `freeze_address_value`: Lock a memory address to a fixed value with a background assertion worker thread and kqueue process lifecycle monitoring.
-14. `unfreeze_address_value`: Release an active memory freeze worker thread.
-15. `export_dylib_patch`: Compile standalone ARM64 C/Objective-C patch into a distributable `.dylib` via `clang`.
+12. `take_memory_snapshot`: Capture a point-in-time snapshot of process writable heap regions with 16KB guard-page fallback.
+13. `diff_memory_snapshots`: Compare two heap snapshots to find mutated values (`changed`, `increased`, `decreased`, `exact_difference`).
+14. `freeze_address_value`: Lock a memory address to a fixed value with a background assertion worker thread and kqueue process lifecycle monitoring.
+15. `unfreeze_address_value`: Release an active memory freeze worker thread.
+16. `export_dylib_patch`: Compile standalone ARM64 C/Objective-C patch into a distributable `.dylib` via `clang`.
 
-### Binary Signature & Pattern Generation
-16. `generate_arm64_aob_signature`: Generate update-resilient Array of Bytes (AoB) pattern signature from ARM64 instructions with Capstone disassembly and PC-relative relocation wildcarding (`ADRP`, `BL`, `B`, `B.<cond>`, `CBZ`, `TBZ`, `LDR`/`STR` immediate offsets).
+### Binary Signature & Multi-Level Pointer Scanning
+17. `generate_arm64_aob_signature`: Generate update-resilient Array of Bytes (AoB) pattern signature from ARM64 instructions with Capstone disassembly and PC-relative relocation wildcarding (`ADRP`, `BL`, `B`, `B.<cond>`, `CBZ`, `TBZ`, `LDR`/`STR` immediate offsets).
+18. `find_pointer_chains`: Discover multi-level static pointer chains (`Module + Offset -> +Offset... -> Target`) from static binary `__DATA` segments to dynamic heap addresses.
 
 ## Requirements & Permissions
 

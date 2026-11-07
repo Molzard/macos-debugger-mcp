@@ -38,9 +38,9 @@ def mask_arm64_instruction(insn: Any, adrp_regs: Set[str]) -> List[str]:
     if mnemonic == "bl":
         return ["??", "??", "??", "94"]
 
-    # 3. Conditional branches B.<cond> (opcode byte 0x54)
+    # 3. Conditional branches B.<cond> (opcode byte 0x54, condition in b0)
     if mnemonic.startswith("b."):
-        return ["??", "??", "??", "54"]
+        return [f"{b0:02X}", "??", "??", "54"]
 
     # 4. Compare and Branch (CBZ / CBNZ)
     if mnemonic in ["cbz", "cbnz"]:
@@ -51,6 +51,8 @@ def mask_arm64_instruction(insn: Any, adrp_regs: Set[str]) -> List[str]:
         return ["??", "??", "??", f"{b3:02X}"]
 
     # 6. LDR / STR / ADD / SUB with immediate offset from register loaded by ADRP
+    # Byte 0 contains target/source register and Rn bits, Byte 3 contains opcode.
+    # Immediate relocation bits reside in Bytes 1 and 2.
     if mnemonic in ["ldr", "str", "ldrb", "strb", "ldrh", "strh", "add", "sub"]:
         uses_adrp = any(reg in insn.op_str.lower() for reg in adrp_regs)
         if uses_adrp:
@@ -58,7 +60,7 @@ def mask_arm64_instruction(insn: Any, adrp_regs: Set[str]) -> List[str]:
             if ops and mnemonic in ["add", "sub"]:
                 dst = ops[0].strip().lower()
                 adrp_regs.add(dst)
-            return ["??", "??", f"{b2:02X}", f"{b3:02X}"]
+            return [f"{b0:02X}", "??", "??", f"{b3:02X}"]
 
     # Normal non-relocation instruction: preserve all bytes
     return [f"{b0:02X}", f"{b1:02X}", f"{b2:02X}", f"{b3:02X}"]

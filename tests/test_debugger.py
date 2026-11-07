@@ -102,11 +102,22 @@ async def test_mcp_server() -> None:
         "read_memory_bytes",
         "write_memory_bytes",
         "set_watchpoint",
+        "resolve_object_at_address",
+        "find_active_instances_of_class",
+        "take_memory_snapshot",
+        "diff_memory_snapshots",
+        "freeze_address_value",
+        "unfreeze_address_value",
+        "export_dylib_patch",
+        "invoke_native_method",
+        "generate_arm64_aob_signature",
+        "find_pointer_chains",
+        "hook_and_log_method",
     ]
-    assert len(expected) == 7, "Should have 7 tools defined"
+    assert len(tool_names) == 18, f"Expected 18 tools, found {len(tool_names)}: {tool_names}"
     for exp in expected:
         assert exp in tool_names, f"Missing MCP tool: {exp}"
-    print(f"✓ All 7 MCP Server tools registered OK: {tool_names}")
+    print(f"✓ All 18 MCP Server tools registered OK: {tool_names}")
 
 
 if __name__ == "__main__":

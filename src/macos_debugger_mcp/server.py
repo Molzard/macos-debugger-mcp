@@ -324,6 +324,62 @@ def generate_arm64_aob_signature(
     return _gen_aob(_debugger, pid, function_address, scan_length=scan_length)
 
 
+@server.tool()
+def find_pointer_chains(
+    pid: int,
+    target_address: str,
+    max_depth: int = 4,
+    max_offset: int = 4096,
+    module_name: Optional[str] = None,
+) -> dict[str, Any]:
+    """Find permanent static pointer paths (Module Base + Multi-Level Offsets) pointing to dynamic target_address across restarts.
+
+    Args:
+        pid: Target process ID.
+        target_address: Dynamic memory address on the heap to find paths to (e.g. '0x104b28190').
+        max_depth: Maximum levels of pointer indirection to trace (default: 4, range: 1-6).
+        max_offset: Maximum byte offset allowed per indirection level (default: 4096 / 0x1000).
+        module_name: Optional filter for base module/dylib name (e.g. 'UnityFramework').
+    """
+    from .pointer_scanner import find_pointer_chains as _find_chains
+    return _find_chains(
+        _debugger,
+        pid,
+        target_address,
+        max_depth=max_depth,
+        max_offset=max_offset,
+        module_name=module_name,
+    )
+
+
+@server.tool()
+def hook_and_log_method(
+    pid: int,
+    function_address: str,
+    capture_count: int = 10,
+    timeout_seconds: float = 10.0,
+    include_backtrace: bool = True,
+) -> dict[str, Any]:
+    """Attach temporary non-destructive live hook via Frida to record arguments (x0-x7), floats (d0-d7), return value, and backtrace.
+
+    Args:
+        pid: Target process ID.
+        function_address: Hex memory address of native function to observe (e.g. '0x102b48000').
+        capture_count: Maximum invocations to capture before automatic detach (default: 10, max: 50).
+        timeout_seconds: Maximum observation duration before automatic detach (default: 10.0, max: 30.0).
+        include_backtrace: Whether to capture symbolic stack backtrace on entry (default: true).
+    """
+    from .interceptor import hook_and_log_method as _hook_log
+    return _hook_log(
+        _debugger,
+        pid,
+        function_address,
+        capture_count=capture_count,
+        timeout_seconds=timeout_seconds,
+        include_backtrace=include_backtrace,
+    )
+
+
 def main() -> None:
     """Run the MCP server over stdio transport."""
     server.run(transport="stdio")

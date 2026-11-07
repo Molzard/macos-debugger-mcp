@@ -53,6 +53,15 @@ VM_USER_TAGS: dict[int, str] = {
 }
 
 
+def strip_pac(ptr: Any) -> int:
+    """Strip Pointer Authentication Codes (PAC) / Top-Byte Ignore (TBI) on ARM64/ARM64e.
+    User-space virtual memory addresses on macOS Apple Silicon are capped at 48-bit.
+    """
+    if ptr is None or not isinstance(ptr, int):
+        return 0
+    return ptr & 0x00007FFFFFFFFFFF
+
+
 def parse_address(addr: str | int) -> int:
     """Parse string hex address (e.g. '0x104b28000') or int into integer address."""
     if isinstance(addr, int):
