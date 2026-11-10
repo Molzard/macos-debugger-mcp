@@ -23,7 +23,7 @@ class task_dyld_info(ctypes.Structure):
 
 
 def get_loaded_modules_and_data_segments(
-    debugger: Any, pid: int
+    debugger: Any, pid: int, exclude_shared_cache: bool = True
 ) -> List[Dict[str, Any]]:
     """Traverse target process dyld image list and extract static __DATA segments."""
     modules: List[Dict[str, Any]] = []
@@ -50,6 +50,9 @@ def get_loaded_modules_and_data_segments(
                         path_ptr = strip_pac(path_ptr)
 
                         if load_addr == 0 or path_ptr == 0:
+                            continue
+
+                        if exclude_shared_cache and (0x180000000 <= load_addr < 0x280000000):
                             continue
 
                         try:
@@ -132,6 +135,7 @@ def find_pointer_chains(
     max_depth: int = 4,
     max_offset: int = 4096,
     module_name: Optional[str] = None,
+    exclude_shared_cache: bool = True,
     mock_modules: Optional[List[Dict[str, Any]]] = None,
     mock_memory: Optional[Dict[int, bytes]] = None,
 ) -> Dict[str, Any]:
@@ -141,7 +145,7 @@ def find_pointer_chains(
     clamped_offset = max(0, min(max_offset, 0x10000))
 
     # 1. Discover modules and static data segments
-    modules = mock_modules or get_loaded_modules_and_data_segments(debugger, pid)
+    modules = mock_modules or get_loaded_modules_and_data_segments(debugger, pid, exclude_shared_cache=exclude_shared_cache)
 
     # Filter modules if module_name requested
     if module_name:
@@ -170,15 +174,31 @@ def find_pointer_chains(
                     indexed_pointers.append((base + off, val))
     else:
         # Read from target process regions
-        regions_info = debugger.inspect_memory_regions(pid, limit=1000)
+        try:
+            regions_info = debugger.inspect_memory_regions(pid, limit=1000, exclude_shared_cache=exclude_shared_cache)
+        except TypeError:
+            regions_info = debugger.inspect_memory_regions(pid, limit=1000)
         PAGE_SIZE = 16384
         CHUNK_SIZE = 1024 * 1024  # 1 MB dynamic chunk
         prealloc_buf = ctypes.create_string_buffer(CHUNK_SIZE)
 
         for r in regions_info.get("regions", []):
+            start_addr = int(r.get("start_address", "0"), 16)
+            if exclude_shared_cache:
+                if 0x180000000 <= start_addr < 0x280000000:
+                    continue
+                if r.get("share_mode") in (1, 2) and start_addr >= 0x180000000:
+                    continue
+            if r.get("pages_resident", 0) == 0 and r.get("pages_dirtied", 0) == 0 and ("pages_resident" in r or "pages_dirtied" in r):
+                continue
+            tag_name = str(r.get("user_tag", ""))
+            tag_id = r.get("user_tag_id", 0)
+            if tag_id == 21 or "IOKIT" in tag_name:
+                continue
+
             prot = r.get("protection", "")
             if "w" not in prot and not any(
-                s_start <= int(r.get("start_address", "0"), 16) < s_end
+                s_start <= start_addr < s_end
                 for m in modules
                 for _, s_start, s_end in m["data_segments"]
             ):

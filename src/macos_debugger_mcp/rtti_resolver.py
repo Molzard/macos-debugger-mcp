@@ -196,7 +196,9 @@ class MachVMAccess:
             raw = raw[:null_idx]
         return raw.decode("utf-8", errors="replace")
 
-    def enumerate_regions(self, writable_only: bool = True) -> List[Tuple[int, int, int]]:
+    def enumerate_regions(
+        self, writable_only: bool = True, exclude_shared_cache: bool = True
+    ) -> List[Tuple[int, int, int]]:
         """List virtual memory regions (start, end, protection)."""
         regions = []
         address = ctypes.c_uint64(0)
@@ -219,6 +221,25 @@ class MachVMAccess:
 
             if info.is_submap:
                 nesting_depth.value += 1
+                continue
+
+            if exclude_shared_cache:
+                if 0x180000000 <= address.value < 0x280000000:
+                    address.value += size.value
+                    continue
+                if getattr(info, "share_mode", 0) in (1, 2) and address.value >= 0x180000000:
+                    address.value += size.value
+                    continue
+
+            # Dirty page & uncommitted region filtering (Section 3)
+            if hasattr(info, "pages_resident") and hasattr(info, "pages_dirtied"):
+                if info.pages_resident == 0 and info.pages_dirtied == 0:
+                    address.value += size.value
+                    continue
+
+            # Skip irrelevant user tags (e.g. VM_MEMORY_IOKIT = 21)
+            if getattr(info, "user_tag", 0) == 21:
+                address.value += size.value
                 continue
 
             prot = info.protection
@@ -415,9 +436,10 @@ class RTTIResolver:
         read_fn: Optional[Callable[[int, int], bytes]] = None,
         regions: Optional[List[Tuple[int, int, int]]] = None,
         target_klass: Optional[int] = None,
+        exclude_shared_cache: bool = True,
     ) -> List[Dict[str, Any]]:
         """Scans writable memory regions for allocated heap instances of the specified class.
-        
+
         Hardened for macOS Apple Silicon:
         - Two-stage pointer indexing with instant MonitorData filter (*(addr+0x0)==klass && *(addr+0x8)==0).
         - Strictly bounded chunk traversal to region end with 16KB page-aligned fallback.
@@ -429,7 +451,7 @@ class RTTIResolver:
 
         results = []
         reader = read_fn or (lambda a, sz: self.vm.read_bytes(a, sz) if self.vm else b"")
-        mem_regions = regions or (self.vm.enumerate_regions(writable_only=True) if self.vm else [])
+        mem_regions = regions or (self.vm.enumerate_regions(writable_only=True, exclude_shared_cache=exclude_shared_cache) if self.vm else [])
 
         PAGE_SIZE = 16384
         CHUNK_SIZE = 2 * 1024 * 1024  # 2 MB dynamic chunk

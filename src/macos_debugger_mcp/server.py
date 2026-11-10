@@ -38,7 +38,7 @@ def attach_debugger(pid: int) -> dict[str, Any]:
 
 @server.tool()
 def inspect_memory_regions(
-    pid: int, limit: int = 100, offset: int = 0
+    pid: int, limit: int = 100, offset: int = 0, exclude_shared_cache: bool = True
 ) -> dict[str, Any]:
     """Retrieve virtual memory segments (Mach-O headers, text, data, heap) and page protection flags (r-x, rw-, etc.).
 
@@ -46,8 +46,11 @@ def inspect_memory_regions(
         pid: Target process ID.
         limit: Maximum number of memory regions to return (default: 100).
         offset: Number of initial memory regions to skip (pagination).
+        exclude_shared_cache: If True, exclude macOS dyld_shared_cache system regions (0x180000000-0x280000000).
     """
-    return _debugger.inspect_memory_regions(pid, limit=limit, offset=offset)
+    return _debugger.inspect_memory_regions(
+        pid, limit=limit, offset=offset, exclude_shared_cache=exclude_shared_cache
+    )
 
 
 @server.tool()
@@ -57,6 +60,7 @@ def search_memory(
     data_type: Literal["int32", "int64", "float", "double", "bytes", "string"] = "int32",
     max_results: int = 50,
     region_type: Literal["all", "writable"] = "writable",
+    exclude_shared_cache: bool = True,
 ) -> dict[str, Any]:
     """Scan memory regions (e.g. writable heap rw-) of a target process for specific values or byte patterns.
 
@@ -66,6 +70,7 @@ def search_memory(
         data_type: Data type format ('int32', 'int64', 'float', 'double', 'bytes', 'string').
         max_results: Maximum candidate addresses to return (default: 50).
         region_type: Scope of regions to scan ('writable' or 'all', default: 'writable').
+        exclude_shared_cache: If True, exclude macOS dyld_shared_cache system regions (0x180000000-0x280000000).
     """
     return _debugger.search_memory(
         pid,
@@ -73,6 +78,7 @@ def search_memory(
         data_type=data_type,
         max_results=max_results,
         region_type=region_type,
+        exclude_shared_cache=exclude_shared_cache,
     )
 
 
@@ -160,6 +166,7 @@ def find_active_instances_of_class(
     class_name: str,
     max_results: int = 50,
     metadata_path: Optional[str] = None,
+    exclude_shared_cache: bool = True,
 ) -> dict[str, Any]:
     """Scan process writable memory (heap) for live instances of a given IL2CPP class.
 
@@ -168,6 +175,7 @@ def find_active_instances_of_class(
         class_name: Target class name or full namespace (e.g. 'CardButton').
         max_results: Maximum matching object instances to return (default: 50).
         metadata_path: Optional path to Unity global-metadata.dat file.
+        exclude_shared_cache: If True, exclude macOS dyld_shared_cache system regions (0x180000000-0x280000000).
     """
     from .rtti_resolver import MachVMAccess, RTTIResolver
     from .il2cpp_metadata import Il2CppMetadataParser
@@ -179,7 +187,9 @@ def find_active_instances_of_class(
     parser = Il2CppMetadataParser(meta_file)
     vm = MachVMAccess(pid)
     resolver = RTTIResolver(parser, vm)
-    instances = resolver.find_active_instances(class_name, max_results=max_results)
+    instances = resolver.find_active_instances(
+        class_name, max_results=max_results, exclude_shared_cache=exclude_shared_cache
+    )
     vm.close()
     return {
         "status": "success",
@@ -194,15 +204,25 @@ def find_active_instances_of_class(
 def take_memory_snapshot(
     pid: int,
     snapshot_name: str,
+    max_total_mb: int = 128,
+    exclude_shared_cache: bool = True,
 ) -> dict[str, Any]:
     """Capture a point-in-time snapshot of all writable memory regions (heap) for diffing.
 
     Args:
         pid: Process ID of running application.
         snapshot_name: Identifier name for the snapshot (e.g. 'before_shot', 'stage_start').
+        max_total_mb: Maximum total MB to capture across heap regions (default: 128 MB).
+        exclude_shared_cache: If True, exclude macOS dyld_shared_cache system regions (0x180000000-0x280000000).
     """
     from .snapshots import take_memory_snapshot as _snap
-    return _snap(_debugger, pid, snapshot_name)
+    return _snap(
+        _debugger,
+        pid,
+        snapshot_name,
+        max_total_mb=max_total_mb,
+        exclude_shared_cache=exclude_shared_cache,
+    )
 
 
 @server.tool()
@@ -331,6 +351,7 @@ def find_pointer_chains(
     max_depth: int = 4,
     max_offset: int = 4096,
     module_name: Optional[str] = None,
+    exclude_shared_cache: bool = True,
 ) -> dict[str, Any]:
     """Find permanent static pointer paths (Module Base + Multi-Level Offsets) pointing to dynamic target_address across restarts.
 
@@ -340,6 +361,7 @@ def find_pointer_chains(
         max_depth: Maximum levels of pointer indirection to trace (default: 4, range: 1-6).
         max_offset: Maximum byte offset allowed per indirection level (default: 4096 / 0x1000).
         module_name: Optional filter for base module/dylib name (e.g. 'UnityFramework').
+        exclude_shared_cache: If True, exclude macOS dyld_shared_cache system regions (0x180000000-0x280000000).
     """
     from .pointer_scanner import find_pointer_chains as _find_chains
     return _find_chains(
@@ -349,6 +371,7 @@ def find_pointer_chains(
         max_depth=max_depth,
         max_offset=max_offset,
         module_name=module_name,
+        exclude_shared_cache=exclude_shared_cache,
     )
 
 
