@@ -513,6 +513,8 @@ class MacOSDebugger:
             raise ValueError("max_results must be greater than 0")
 
         dtype = data_type.lower()
+        is_wildcard: bool = False
+        needle_mask: bytes = b""
         try:
             if dtype == "int32":
                 needle = struct.pack("<i", int(value))
@@ -525,14 +527,36 @@ class MacOSDebugger:
             elif dtype == "string":
                 needle = str(value).encode("utf-8")
             elif dtype == "bytes":
-                clean_hex = str(value).strip().replace("0x", "").replace(" ", "")
-                needle = bytes.fromhex(clean_hex)
+                clean_val = str(value).strip()
+                if "?" in clean_val:
+                    tokens = clean_val.split()
+                    p_list: list[int] = []
+                    m_list: list[int] = []
+                    for tok in tokens:
+                        if tok in ("?", "??"):
+                            p_list.append(0)
+                            m_list.append(0)
+                        else:
+                            p_list.append(int(tok.replace("0x", ""), 16))
+                            m_list.append(0xFF)
+                    needle = bytes(p_list)
+                    needle_mask = bytes(m_list)
+                    is_wildcard = True
+                else:
+                    clean_hex = clean_val.replace("0x", "").replace(" ", "")
+                    needle = bytes.fromhex(clean_hex)
+                    needle_mask = b"\xff" * len(needle)
+                    is_wildcard = False
             else:
                 raise ValueError(
                     f"Unsupported data_type: {data_type}. Choose from 'int32', 'int64', 'float', 'double', 'bytes', 'string'."
                 )
         except Exception as e:
             raise ValueError(f"Failed to encode value '{value}' as '{data_type}': {e}")
+
+        if dtype != "bytes":
+            needle_mask = b"\xff" * len(needle)
+            is_wildcard = False
 
         needle_len = len(needle)
         if needle_len == 0:
@@ -618,23 +642,54 @@ class MacOSDebugger:
                     )
                     if kr_read == 0 and out_size.value >= needle_len:
                         data = buf.raw[: out_size.value]
-                        pos = 0
-                        while pos <= len(data) - needle_len:
-                            idx = data.find(needle, pos)
-                            if idx == -1:
-                                break
-                            match_addr = curr + idx
-                            matches.append({
-                                "address": f"0x{match_addr:x}",
-                                "offset": idx,
-                                "region_base": f"0x{reg_start:x}",
-                                "region_size": reg_len,
-                                "protection": prot_str,
-                                "user_tag": tag_name,
-                            })
-                            if len(matches) >= max_results:
-                                break
-                            pos = idx + 1
+                        # Use NEON vectorized scanner for byte arrays >= 64 bytes
+                        if is_wildcard and needle_mask and len(data) >= needle_len:
+                            from .accel import aob_scan_all_neon
+                            needed = max_results - len(matches)
+                            chunk_matches = aob_scan_all_neon(data, len(data), needle, needle_mask, max_results=needed)
+                            for idx in chunk_matches:
+                                match_addr = curr + idx
+                                matches.append({
+                                    "address": f"0x{match_addr:x}",
+                                    "offset": idx,
+                                    "region_base": f"0x{reg_start:x}",
+                                    "region_size": reg_len,
+                                    "protection": prot_str,
+                                    "user_tag": tag_name,
+                                })
+                        elif len(data) >= 64:
+                            from .accel import aob_scan_all_neon
+                            exact_mask = b"\xff" * needle_len
+                            needed = max_results - len(matches)
+                            chunk_matches = aob_scan_all_neon(data, len(data), needle, exact_mask, max_results=needed)
+                            for idx in chunk_matches:
+                                match_addr = curr + idx
+                                matches.append({
+                                    "address": f"0x{match_addr:x}",
+                                    "offset": idx,
+                                    "region_base": f"0x{reg_start:x}",
+                                    "region_size": reg_len,
+                                    "protection": prot_str,
+                                    "user_tag": tag_name,
+                                })
+                        else:
+                            pos = 0
+                            while pos <= len(data) - needle_len:
+                                idx = data.find(needle, pos)
+                                if idx == -1:
+                                    break
+                                match_addr = curr + idx
+                                matches.append({
+                                    "address": f"0x{match_addr:x}",
+                                    "offset": idx,
+                                    "region_base": f"0x{reg_start:x}",
+                                    "region_size": reg_len,
+                                    "protection": prot_str,
+                                    "user_tag": tag_name,
+                                })
+                                if len(matches) >= max_results:
+                                    break
+                                pos = idx + 1
 
                         if len(matches) >= max_results:
                             break

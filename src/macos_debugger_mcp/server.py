@@ -256,6 +256,23 @@ def diff_memory_snapshots(
 
 
 @server.tool()
+def release_memory_snapshot(
+    snapshot_name: str,
+) -> dict[str, Any]:
+    """Release and deallocate a memory snapshot (unmapping Zero-Copy CoW memory).
+
+    Args:
+        snapshot_name: Name of the snapshot to release (or 'all' to clear all snapshots).
+    """
+    from .snapshots import clear_all_snapshots, release_memory_snapshot as _rel
+    if snapshot_name.lower() == "all":
+        clear_all_snapshots()
+        return {"status": "success", "released": "all"}
+    success = _rel(snapshot_name)
+    return {"status": "success" if success else "not_found", "snapshot_name": snapshot_name}
+
+
+@server.tool()
 def freeze_address_value(
     pid: int,
     address: str,
